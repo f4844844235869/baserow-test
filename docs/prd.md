@@ -359,56 +359,76 @@ Baserow 通过 LangChain 统一封装多家 LLM 提供商，而不是直接集�
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                     浏览器客户端                          │
-│              Nuxt 3 (Vue 3 + Vuex + TypeScript)          │
+│              Nuxt 3 (Vue 3 + Pinia + TypeScript)         │
 └──────────────────────┬──────────────────────────────────┘
                        │ HTTP REST / WebSocket
 ┌──────────────────────▼──────────────────────────────────┐
-│                   API 网关层                              │
-│   Django ASGI (Daphne/Uvicorn) + Django Channels         │
+│                   API 服务层                              │
+│   FastAPI (Uvicorn / Gunicorn ASGI)                      │
 │   ┌──────────────────────────────────────────────────┐  │
-│   │           Django REST Framework                   │  │
-│   │   /api/workspaces/  /api/database/  /api/builder/ │  │
+│   │           FastAPI Router + Pydantic Schema        │  │
+│   │   /api/workspaces  /api/database  /api/builder    │  │
 │   └──────────────────────────────────────────────────┘  │
 │   ┌──────────────────────────────────────────────────┐  │
-│   │       WebSocket Consumer (Django Channels)        │  │
+│   │     FastAPI WebSocket (/ws/workspaces/{id})       │  │
 │   └──────────────────────────────────────────────────┘  │
 └────────────┬────────────────────────┬───────────────────┘
              │                        │
 ┌────────────▼──────────┐   ┌─────────▼────────────────────┐
-│    业务逻辑层（Handler）│   │      异步任务层（Celery）       │
-│  CoreHandler           │   │  自动化工作流执行               │
-│  DatabaseHandler       │   │  文件处理、导入导出              │
-│  BuilderHandler        │   │  Webhook 触发                  │
-│  AutomationHandler     │   │  AI 字段重计算                  │
+│   业务逻辑层（Service） │   │      异步任务层（Celery）       │
+│  WorkspaceService      │   │  自动化工作流执行               │
+│  TableService          │   │  文件处理、导入导出              │
+│  BuilderService        │   │  Webhook 触发                  │
+│  AutomationService     │   │  AI 字段重计算                  │
 └────────────┬──────────┘   └─────────────────────────────┘
              │
 ┌────────────▼────────────────────────────────────────────┐
 │                    数据层                                 │
 │   PostgreSQL（核心业务数据 + 用户表格数据）                  │
-│   Redis（Session 缓存 + Celery Broker + WebSocket 通道）  │
+│   SQLAlchemy 2.0 async ORM + Alembic 迁移                │
+│   Redis（Celery Broker + WebSocket 广播频道缓存）           │
 │   Object Storage（S3 / Azure / GCS - 文件存储）           │
 └─────────────────────────────────────────────────────────┘
 ```
 
 ### 5.2 后端设计决策
 
-#### 5.2.1 为什么选择 Django + Django REST Framework？
+#### 5.2.1 为什么选择 FastAPI？
 
-1. **成熟稳定**：Django 是 Python 生态中最成熟的 Web 框架，有完善的 ORM、迁移管理、认证系统。
-2. **DRF 的序列化与验证**：DRF Serializer 提供了声明式的请求验证和响应序列化，减少样板代码。
-3. **Django Channels 支持**：同一框架可以同时处理 HTTP 和 WebSocket，无需引入独立的 WebSocket 服务。
-4. **强大的迁移系统**：Baserow 的表结构管理涉及大量 DDL 操作，Django Migrations 提供了可靠的版本管理。
-5. **插件生态**：django-rest-framework、djangorestframework-simplejwt、drf-spectacular 等插件覆盖了常见需求。
+本项目后端采用 **FastAPI** 作为核心 Web 框架，替代传统 Django REST Framework，原因如下：
 
-#### 5.2.2 Handler 模式（为什么业务逻辑不写在 View 中？）
+1. **原生异步支持**：FastAPI 基于 Starlette，完全支持 Python `async/await`，可以在单进程中高效处理大量并发连接，无需额外的异步中间件。
+2. **Pydantic 模型驱动**：请求体验证、响应序列化均由 Pydantic v2 模型自动完成，类型安全，IDE 提示完善，且自动生成 JSON Schema。
+3. **自动 OpenAPI 文档**：FastAPI 自动生成 `/docs`（Swagger UI）和 `/redoc` 文档，前后端接口对齐成本极低，无需手动维护接口文档。
+4. **高性能**：基准测试中 FastAPI 性能接近 Node.js/Go，远超 Django/Flask，适合高并发 API 场景。
+5. **WebSocket 原生支持**：FastAPI/Starlette 原生支持 WebSocket，无需引入 Django Channels 这样的额外层。
+6. **依赖注入系统**：FastAPI 内置强大的依赖注入（`Depends`），认证、权限、数据库会话等横切关注点可以以声明式方式注入，代码更清晰。
+7. **类型系统一致性**：从路由参数到请求体到响应体全程类型化，减少运行时错误。
 
-Baserow 使用 `XxxHandler` 类（如 `CoreHandler`、`DatabaseHandler`）封装所有业务逻辑，API View 只负责请求解析和响应序列化。
+技术栈完整列表：
+
+| 组件 | 选型 | 说明 |
+|------|------|------|
+| Web 框架 | FastAPI 0.115+ | 路由、依赖注入、WebSocket |
+| 数据验证 | Pydantic v2 | 请求/响应 Schema |
+| ORM | SQLAlchemy 2.0（async） | 数据库访问，支持 async session |
+| 数据库迁移 | Alembic | Schema 版本管理 |
+| 认证 | python-jose + passlib | JWT 签发与验证 |
+| 任务队列 | Celery 5 + Redis | 异步任务执行 |
+| 实时通信 | FastAPI WebSocket | 多用户协作实时推送 |
+| 文档 | FastAPI 自动生成 | Swagger UI + ReDoc |
+| 测试 | pytest + httpx | 异步 API 测试 |
+| 容器化 | Docker + Docker Compose | 开发与生产部署 |
+
+#### 5.2.2 Service 模式（为什么业务逻辑不写在 Router 中？）
+
+Baserow FastAPI 版使用 `XxxService` 类（如 `WorkspaceService`、`TableService`）封装所有业务逻辑，API Router 只负责请求解析和响应序列化。
 
 原因：
-1. **可测试性**：Handler 方法可以在不依赖 HTTP 上下文的情况下被单元测试直接调用。
-2. **复用性**：Celery 任务、WebSocket 处理、Management Command 都可以直接调用 Handler，不需要模拟 HTTP 请求。
-3. **关注点分离**：View 层负责 HTTP 协议细节，Handler 层负责业务规则，两者变化原因不同，分离符合 SRP（单一职责原则）。
-4. **Action / Undo-Redo**：Handler 方法是 Action 系统（撤销/重做）的基础操作单元，将逻辑集中在 Handler 使得 Action 的封装更简单。
+1. **可测试性**：Service 方法可以在不依赖 HTTP 上下文的情况下被单元测试直接调用。
+2. **复用性**：Celery 任务、WebSocket 处理、CLI 脚本都可以直接调用 Service，不需要模拟 HTTP 请求。
+3. **关注点分离**：Router 层负责 HTTP 协议细节，Service 层负责业务规则，两者变化原因不同，分离符合 SRP（单一职责原则）。
+4. **Action / Undo-Redo**：Service 方法是 Action 系统（撤销/重做）的基础操作单元，将逻辑集中在 Service 使得 Action 的封装更简单。
 
 #### 5.2.3 Action / Undo-Redo 系统设计
 
@@ -426,17 +446,17 @@ Action 执行记录持久化到 `Action` 模型中，支持跨会话的撤销历
 
 #### 5.2.4 多态模型（Polymorphic Models）
 
-Application、Field、View 等实体使用 Django 的多态模型继承（`django-model-utils` 的 `PolymorphicModel`）：
+Application、Field、View 等实体使用 SQLAlchemy 的多态继承（`polymorphic_on` + `polymorphic_identity`）：
 - `Application` → `Database`、`Builder`、`Dashboard`、`Automation`
 - `Field` → `TextField`、`NumberField`、`DateField`、`FormulaField` 等 40+ 子类
 - `View` → `GridView`、`GalleryView`、`KanbanView` 等
 
 原因：
 1. **类型安全**：每种类型有自己专属字段，不需要在通用表中用 JSONB 存储差异化配置（避免"万能JSONB"反模式）。
-2. **可扩展性**：添加新的 Field 类型只需新增一个 Python 类和对应的 Django Model，无需修改核心表结构。
+2. **可扩展性**：添加新的 Field 类型只需新增一个 Python 类和对应的 SQLAlchemy Model，无需修改核心表结构。
 3. **ORM 查询**：可以通过基类（如 `Field`）进行跨类型查询，也可以通过子类精确查询特定类型。
 
-代价是多态查询会引入额外 JOIN，Baserow 通过 `select_related`、`prefetch_related` 和 `specific()` 等 ORM 优化手段缓解性能问题。
+代价是多态查询会引入额外 JOIN，通过 `selectinload`、`joinedload` 等 SQLAlchemy async 加载策略缓解性能问题。
 
 ### 5.3 前端设计决策
 
@@ -448,14 +468,15 @@ Application、Field、View 等实体使用 Django 的多态模型继承（`djang
 4. **TypeScript 支持**：Vue 3 + Nuxt 3 有完善的 TypeScript 类型支持，提升代码质量。
 5. **生态成熟**：Vuex 4、vue-router 4 与 Nuxt 3 良好集成。
 
-#### 5.3.2 Vuex 模块化状态管理
+#### 5.3.2 Pinia 模块化状态管理
 
-前端状态按模块组织（`workspace`、`database`、`builder` 等），每个模块管理自己的状态切片。
+前端状态使用 **Pinia**（Vue 3 官方推荐的状态管理库，替代 Vuex）按模块组织（`useWorkspaceStore`、`useDatabaseStore`、`useBuilderStore` 等），每个 Store 管理自己的状态切片。
 
 原因：
 1. **实时协作**：WebSocket 接收到服务端推送时，需要精确更新 Store 中的特定状态，模块化使得更新目标明确。
-2. **可预测的状态变更**：所有状态变更通过 Mutation 进行，便于调试和时间旅行调试（Vue DevTools）。
+2. **可预测的状态变更**：所有状态变更通过 Action 进行，支持 Vue DevTools 时间旅行调试。
 3. **服务端状态同步**：Store 是服务端数据在前端的缓存，模块化使缓存失效逻辑清晰。
+4. **TypeScript 优先**：Pinia 原生 TypeScript 支持优于 Vuex，无需额外配置即可获得完整类型推断。
 
 #### 5.3.3 为什么 Grid View 不使用虚拟 DOM 框架的标准渲染？
 
@@ -501,14 +522,14 @@ Baserow 为 Grid View 实现了**虚拟滚动（Virtual Scrolling）**：只渲�
 
 ### 5.5 实时通信设计
 
-#### 5.5.1 WebSocket + Django Channels 架构
+#### 5.5.1 WebSocket + FastAPI 架构
 
-实时推送（多用户协作时看到彼此的变更）通过 Django Channels + Redis 实现：
+实时推送（多用户协作时看到彼此的变更）通过 FastAPI 原生 WebSocket + Redis Pub/Sub 实现：
 
 1. 用户 A 对行进行修改 → 发送 REST API 请求
-2. Handler 执行业务逻辑，保存到数据库
-3. Handler 向 Redis Channel Layer 发布事件
-4. Django Channels Consumer 接收事件，推送 WebSocket 消息到相关客户端（订阅了相同 Table 的用户）
+2. Service 执行业务逻辑，保存到数据库
+3. Service 向 Redis Pub/Sub 频道发布事件
+4. FastAPI WebSocket 端点订阅对应频道，将事件推送给相关客户端（订阅了相同工作区的用户）
 
 为什么选择 WebSocket 而非 Server-Sent Events (SSE) 或轮询（Polling）？
 - **双向通信**：WebSocket 支持客户端主动发送消息（未来协作功能可能需要），SSE 只支持单向推送。
@@ -517,12 +538,11 @@ Baserow 为 Grid View 实现了**虚拟滚动（Virtual Scrolling）**：只渲�
 
 #### 5.5.2 Redis 的角色
 
-Redis 在 Baserow 中承担三个角色：
-1. **Django 会话缓存**：减少数据库会话查询压力
-2. **Celery Broker**：任务队列消息传递
-3. **Django Channels Layer**：WebSocket 消息广播（多实例部署时同步）
+Redis 在本项目中承担两个角色：
+1. **Celery Broker**：任务队列消息传递
+2. **WebSocket Pub/Sub**：WebSocket 消息广播（多实例部署时同步）
 
-将三个用途共享同一 Redis 实例（默认）vs. 分开配置，取决于部署规模：
+将两个用途共享同一 Redis 实例（默认）vs. 分开配置，取决于部署规模：
 - 单机部署：共享一个 Redis，简化运维
 - 大规模部署：建议分开，避免相互影响
 
@@ -629,15 +649,15 @@ Premium 和 Enterprise 功能代码位于独立的 `/premium` 和 `/enterprise` 
 | API Token | 数据库级别的访问 Token，支持读写权限分离 |
 | 密码策略 | 最小长度、复杂度要求可配置（Enterprise+） |
 | 会话管理 | JWT 黑名单机制，支持强制踢出会话 |
-| CSRF 防护 | Django 内置 CSRF 防护 |
+| CSRF 防护 | FastAPI + JWT 无状态认证，无 Cookie CSRF 风险 |
 | XSS 防护 | 前端输出 HTML 转义，Content Security Policy |
-| SQL 注入防护 | ORM 参数化查询，禁止原始 SQL 拼接 |
+| SQL 注入防护 | SQLAlchemy 参数化查询，禁止原始 SQL 拼接 |
 
 ### 6.4 可扩展性需求
 
 | 维度 | 方案 |
 |------|------|
-| **水平扩展 API** | Django 无状态设计，可以多实例部署在负载均衡后 |
+| **水平扩展 API** | FastAPI 无状态设计，可以多实例部署在负载均衡后 |
 | **水平扩展 Celery** | 增加 Worker 节点 |
 | **数据库扩展** | PostgreSQL Read Replica 分离读写 |
 | **文件存储扩展** | 对接云存储（S3/Azure/GCS），无本地文件系统依赖 |
@@ -681,33 +701,69 @@ Premium 和 Enterprise 功能代码位于独立的 `/premium` 和 `/enterprise` 
 #### 7.1.1 代码组织规范
 
 ```
-backend/src/baserow/
-├── api/                    # REST API 层（Views, Serializers, URLs）
-│   └── {feature}/
-│       ├── views.py        # API 视图（仅负责请求/响应处理）
-│       ├── serializers.py  # 请求/响应序列化
-│       └── urls.py         # URL 路由
-├── contrib/{feature}/      # 功能模块
-│   ├── handler.py          # 业务逻辑（所有业务写这里）
-│   ├── models.py           # 数据模型
-│   ├── exceptions.py       # 自定义异常
-│   ├── types.py            # Python 类型定义
-│   ├── registries.py       # 注册表定义
-│   └── field_types.py      # 具体类型实现（字段/视图/等）
-└── core/                   # 核心通用模块
+backend/
+├── app/
+│   ├── main.py                 # FastAPI 应用入口
+│   ├── config.py               # 配置管理（pydantic-settings）
+│   ├── dependencies.py         # 公共依赖注入（auth, db session）
+│   ├── api/                    # REST API 路由层
+│   │   └── v1/
+│   │       ├── auth.py         # 认证路由
+│   │       ├── workspaces.py   # 工作区路由
+│   │       ├── tables.py       # 表路由
+│   │       ├── fields.py       # 字段路由
+│   │       ├── rows.py         # 行路由
+│   │       ├── views.py        # 视图路由
+│   │       ├── builder.py      # Builder 路由
+│   │       ├── dashboard.py    # 仪表板路由
+│   │       └── automation.py   # 自动化路由
+│   ├── services/               # 业务逻辑层
+│   │   ├── workspace_service.py
+│   │   ├── table_service.py
+│   │   ├── field_service.py
+│   │   ├── row_service.py
+│   │   └── ...
+│   ├── models/                 # SQLAlchemy ORM 模型
+│   │   ├── base.py
+│   │   ├── user.py
+│   │   ├── workspace.py
+│   │   ├── application.py
+│   │   ├── table.py
+│   │   ├── field.py
+│   │   └── ...
+│   ├── schemas/                # Pydantic 请求/响应 Schema
+│   │   ├── auth.py
+│   │   ├── workspace.py
+│   │   ├── table.py
+│   │   ├── field.py
+│   │   ├── row.py
+│   │   └── ...
+│   ├── exceptions/             # 自定义异常
+│   │   └── handlers.py
+│   ├── websocket/              # WebSocket 实时通信
+│   │   └── manager.py
+│   └── tasks/                  # Celery 异步任务
+│       ├── automation.py
+│       └── import_export.py
+├── alembic/                    # 数据库迁移
+│   └── versions/
+├── tests/                      # 测试
+│   ├── unit/
+│   └── integration/
+└── pyproject.toml
 ```
 
 #### 7.1.2 命名规范
 
 | 元素 | 规范 | 示例 |
 |------|------|------|
-| 类名 | PascalCase | `CoreHandler`, `TextFieldType` |
+| 类名 | PascalCase | `WorkspaceService`, `TextFieldType` |
 | 函数/方法 | snake_case | `create_table()`, `get_workspace()` |
 | 变量 | snake_case | `workspace_id`, `field_type` |
 | 常量 | UPPER_SNAKE_CASE | `MAX_FIELDS_PER_TABLE = 1500` |
 | 数据库表（Baserow 用户表） | `database_table_{id}` | `database_table_42` |
 | 数据库列（Baserow 用户字段） | `field_{id}` | `field_123` |
-| URL pattern | kebab-case | `/api/database/rows/table/{id}/` |
+| URL pattern | kebab-case | `/api/v1/workspaces/{id}/tables` |
 
 #### 7.1.3 API 设计规范
 
@@ -720,23 +776,23 @@ backend/src/baserow/
     "detail": "Human readable message"
   }
   ```
-- 所有 API 必须在 drf-spectacular 中添加文档注解（`@extend_schema`）
+- 所有 API 路由必须使用 FastAPI 的 `response_model` 指定响应 Schema，自动生成 OpenAPI 文档
 - 新增 API 须在 `changelog.md` 中标注
 
 #### 7.1.4 测试规范
 
-- 每个 Handler 方法需有对应的单元测试（`tests/baserow/contrib/{feature}/test_{feature}_handler.py`）
-- 每个 API View 需有对应的集成测试（`tests/baserow/api/{feature}/test_{feature}_views.py`）
-- 测试使用 `pytest` + `pytest-django`，禁止使用 `unittest.TestCase`
+- 每个 Service 方法需有对应的单元测试（`tests/unit/services/test_{feature}_service.py`）
+- 每个 API 路由需有对应的集成测试（`tests/integration/api/test_{feature}.py`）
+- 测试使用 `pytest` + `httpx.AsyncClient`，禁止使用 `unittest.TestCase`
 - 测试覆盖率目标：核心功能 > 80%
 - 测试中使用 `pytest.fixture` 管理测试数据，禁止在测试函数中直接创建业务对象（应通过 Fixture）
 - 测试不得依赖测试执行顺序
 
 #### 7.1.5 数据库迁移规范
 
-- 每次 Model 修改必须生成对应 Migration 文件
-- Migration 文件必须是可逆的（提供 `reverse` 操作）
-- 大表字段添加必须使用 `db_default` 而非 Python 层 default，避免锁表
+- 每次 Model 修改必须生成对应 Alembic 迁移脚本
+- 迁移脚本必须包含 `upgrade()` 和 `downgrade()` 函数
+- 大表字段添加必须使用数据库层 `DEFAULT`，避免锁表
 - 重命名字段必须分两步完成：先添加新字段，数据迁移后再删除旧字段
 
 ### 7.2 前端开发规范
@@ -744,37 +800,51 @@ backend/src/baserow/
 #### 7.2.1 代码组织规范
 
 ```
-web-frontend/modules/{feature}/
-├── components/         # Vue 组件
-│   ├── {Feature}.vue   # 业务组件
-│   └── {Feature}/      # 子组件目录
-├── pages/              # Nuxt 路由页面
-├── store/              # Vuex Store 模块
-├── services/           # API 调用服务
-├── mixins/             # Vue Mixins（遗留，新代码优先用 Composables）
-├── composables/        # Vue Composition API
-└── assets/             # 静态资源（SCSS、图片）
+web-frontend/
+├── pages/                  # Nuxt 路由页面
+├── components/             # 通用 Vue 组件
+│   ├── workspace/          # 工作区相关组件
+│   ├── database/           # 数据库/表格相关组件
+│   ├── builder/            # Builder 相关组件
+│   └── ui/                 # 通用 UI 组件
+├── stores/                 # Pinia Store 模块
+│   ├── workspace.ts
+│   ├── database.ts
+│   ├── builder.ts
+│   └── auth.ts
+├── services/               # API 调用服务层（对应后端接口）
+│   ├── workspaceService.ts
+│   ├── tableService.ts
+│   ├── rowService.ts
+│   └── ...
+├── composables/            # Vue Composition API 复用逻辑
+├── types/                  # TypeScript 类型定义（与后端 Schema 对应）
+│   ├── workspace.ts
+│   ├── table.ts
+│   ├── field.ts
+│   └── row.ts
+└── utils/                  # 工具函数
 ```
 
 #### 7.2.2 组件规范
 
-- 优先使用 Composition API（`<script setup>`）
+- 优先使用 Composition API（`<script setup lang="ts">`）
 - 组件 Props 必须有 TypeScript 类型定义
 - 组件 Emits 必须有明确的事件类型
-- 禁止在组件中直接调用 `axios`，必须通过 `services/` 层
-- 禁止在组件中直接修改 Vuex State，必须通过 `commit` Mutation 或 `dispatch` Action
+- 禁止在组件中直接调用 `fetch`/`axios`，必须通过 `services/` 层
+- 禁止在组件中直接修改 Pinia Store State，必须通过 Store Action
 
 #### 7.2.3 状态管理规范
 
-- Vuex Store 模块按功能模块组织
+- Pinia Store 按功能模块组织（每个功能一个 Store）
 - 服务端数据必须经过 Store，禁止组件本地缓存服务端数据（避免与 WebSocket 实时更新不一致）
 - WebSocket 消息处理在 Store Action 中完成
 
 #### 7.2.4 测试规范
 
 - 组件测试使用 Vitest + `@vue/test-utils`
-- 每个关键 Store Action / Mutation 需有单元测试
-- 测试文件与被测文件同级（`components/Foo.vue` 对应 `test/unit/components/Foo.spec.js`）
+- 每个关键 Store Action 需有单元测试
+- 测试文件与被测文件同级（`components/Foo.vue` 对应 `test/unit/components/Foo.spec.ts`）
 
 ---
 
