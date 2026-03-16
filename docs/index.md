@@ -8,6 +8,12 @@ experience while keeping it easy for developers to write plugins and maintain th
 codebase. The developer documentation contains several topics you might need as a
 developer.
 
+## 产品需求文档（PRD）
+
+* [产品需求文档（PRD）](./prd.md): Baserow 产品需求文档（FastAPI 版），包含功能需求、技术架构设计与开发规范。
+* [后端开发文档](./backend-prd.md): 面向后端工程师的详细开发文档，包含 FastAPI 接口定义、Pydantic Schema、数据库模型设计与 Celery 任务。
+* [前端开发文档](./frontend-prd.md): 面向前端工程师的详细开发文档，包含 TypeScript 类型定义、API Service 层、Pinia Store 设计、WebSocket 集成与组件规范。
+
 ## Installation
 
 We provide a hosted version of Baserow which you can sign up and start using immediately
